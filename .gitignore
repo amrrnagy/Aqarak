@@ -3,4 +3,5 @@
 __pycache__/
 .pytest_cache/
 data/processed/*.db
+data/processed/*.sqlite
 data/processed/chroma/

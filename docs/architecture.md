@@ -1,7 +1,32 @@
 # Architecture
 
-The initial implementation separates deterministic calculations, session
-memory, structured listing data, and semantic reference material.
+The application separates the agent, deterministic calculations, retrieval,
+API, and Streamlit UI into independently replaceable components.
+
+## Runtime architecture
+
+```mermaid
+flowchart LR
+    Browser[User browser] --> UI[Streamlit UI]
+    UI -->|HTTP + X-API-Key| API[FastAPI /v1]
+    API --> Auth[API-key auth + rate limiter]
+    API --> Cache[TTL cache for stateless listing searches]
+    API --> Agent[Agent + session memory]
+    API --> Retriever[Hybrid retriever]
+    Agent --> Tools[Deterministic tools]
+    Agent --> LLM[Provider-neutral LLM client]
+    Tools --> SQLite[(SQLite listings)]
+    Retriever --> SQLite
+    Retriever --> Chroma[(Chroma vector store)]
+    Ingest[Ingestion pipeline] --> SQLite
+    Ingest --> Chroma
+    API --> Metrics[(SQLite API metrics)]
+    LLM --> Metrics
+```
+
+The UI communicates with the backend over HTTP only. Provider SDKs are
+isolated behind `agent/llm.py`; API monitoring stores operational data in a
+separate SQLite database.
 
 ## Agent turn
 
@@ -12,6 +37,8 @@ request with tool outputs to the LLM for wording. The final reply is checked by
 `verify_numeric_claims`; one regeneration is attempted before an unsupported
 numeric reply is rejected. Provider-specific SDK code is isolated in
 `agent/llm.py`, selected through `LLM_PROVIDER`, `LLM_API_KEY`, and `LLM_MODEL`.
+Groq uses the OpenAI-compatible Chat Completions adapter pointed at
+`https://api.groq.com/openai/v1`.
 
 ## Data and retrieval
 
@@ -43,6 +70,8 @@ numeric reply is rejected. Provider-specific SDK code is isolated in
 
 ## Local workflow
 
-Install `requirements.txt`, run `python -m rag.ingest`, then
-`python -m rag.evaluate`. Chroma uses its bundled local embedding function;
-the model is downloaded and cached on first initialization.
+Copy `.env.example` to `.env`, configure `API_KEY` and the selected LLM
+provider, then install `requirements.txt`. Run `python -m rag.ingest` before
+starting the API. Start the API with `uvicorn api.main:app --reload` and the UI
+with `streamlit run ui/app.py`. Chroma uses its bundled local embedding
+function; the model is downloaded and cached on first use.

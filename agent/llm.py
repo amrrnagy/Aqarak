@@ -53,29 +53,51 @@ class LLMResponseError(RuntimeError):
     """Raised when the provider returns a response that cannot be normalized."""
 
 
-class OpenAIChatClient(LLMClient):
-    """Chat Completions adapter; provider SDK access stays in this module."""
+class LLMProviderError(RuntimeError):
+    """Raised when a configured model provider rejects or cannot serve a request."""
 
-    def __init__(self, api_key: str, model: str) -> None:
+    def __init__(
+        self, message: str, *, status_code: Optional[int] = None
+    ) -> None:
+        super().__init__(message)
+        self.status_code = status_code
+
+
+class OpenAIChatClient(LLMClient):
+    """OpenAI-compatible Chat Completions adapter."""
+
+    def __init__(
+        self,
+        api_key: str,
+        model: str,
+        *,
+        base_url: Optional[str] = None,
+        provider: str = "openai",
+    ) -> None:
         if not api_key.strip():
             raise LLMConfigurationError("LLM_API_KEY must be configured")
         if not model.strip():
             raise LLMConfigurationError("LLM_MODEL must be configured")
         try:
-            from openai import OpenAI
+            from openai import APIError, OpenAI
         except ImportError as exc:
             raise LLMConfigurationError(
-                "The OpenAI provider requires the openai package"
+                "OpenAI-compatible providers require the openai package"
             ) from exc
-        self._client = OpenAI(api_key=api_key)
+        client_options: dict[str, str] = {"api_key": api_key}
+        if base_url is not None:
+            client_options["base_url"] = base_url
+        self._client = OpenAI(**client_options)
         self._model = model
+        self._api_error = APIError
+        self._provider = provider
 
     def chat(
         self,
         messages: Sequence[Mapping[str, Any]],
         tools: Sequence[Mapping[str, Any]] = (),
     ) -> LLMResponse:
-        """Call OpenAI and convert its message/tool-call shape to shared models."""
+        """Call the configured compatible endpoint and normalize its response."""
         request: dict[str, Any] = {
             "model": self._model,
             "messages": [dict(message) for message in messages],
@@ -83,7 +105,18 @@ class OpenAIChatClient(LLMClient):
         if tools:
             request["tools"] = [dict(tool) for tool in tools]
             request["tool_choice"] = "auto"
-        response = self._client.chat.completions.create(**request)
+        try:
+            response = self._client.chat.completions.create(**request)
+        except self._api_error as exc:
+            status_code = getattr(exc, "status_code", None)
+            logger.warning(
+                "LLM provider request failed",
+                extra={"provider": self._provider, "status_code": status_code},
+            )
+            raise LLMProviderError(
+                f"The {self._provider} provider could not complete the request.",
+                status_code=status_code,
+            ) from exc
         if not response.choices:
             raise LLMResponseError("LLM provider returned no completion choices")
 
@@ -121,7 +154,7 @@ class OpenAIChatClient(LLMClient):
         logger.info(
             "Received LLM completion",
             extra={
-                "provider": "openai",
+                "provider": self._provider,
                 "model": self._model,
                 "tool_call_count": len(tool_calls),
                 "prompt_tokens": usage.prompt_tokens if usage else None,
@@ -141,6 +174,7 @@ class GeminiChatClient(LLMClient):
             raise LLMConfigurationError("LLM_MODEL must be configured")
         try:
             from google import genai
+            from google.genai import errors
             from google.genai import types
         except ImportError as exc:
             raise LLMConfigurationError(
@@ -149,6 +183,7 @@ class GeminiChatClient(LLMClient):
         self._client = genai.Client(api_key=api_key)
         self._types = types
         self._model = model
+        self._api_error = errors.APIError
 
     def chat(
         self,
@@ -192,11 +227,24 @@ class GeminiChatClient(LLMClient):
                 self._types.AutomaticFunctionCallingConfig(disable=True)
             )
 
-        response = self._client.models.generate_content(
-            model=self._model,
-            contents=contents,
-            config=self._types.GenerateContentConfig(**config),
-        )
+        try:
+            response = self._client.models.generate_content(
+                model=self._model,
+                contents=contents,
+                config=self._types.GenerateContentConfig(**config),
+            )
+        except self._api_error as exc:
+            status_code = getattr(exc, "code", None) or getattr(
+                exc, "status_code", None
+            )
+            logger.warning(
+                "LLM provider request failed",
+                extra={"provider": "gemini", "status_code": status_code},
+            )
+            raise LLMProviderError(
+                "The Gemini provider could not complete the request.",
+                status_code=status_code,
+            ) from exc
         if not response.candidates:
             raise LLMResponseError("Gemini returned no completion candidates")
         candidate = response.candidates[0]
@@ -265,8 +313,15 @@ def create_llm_client() -> LLMClient:
     model = os.getenv("LLM_MODEL", "")
     if provider == "openai":
         return OpenAIChatClient(api_key=api_key, model=model)
+    if provider == "groq":
+        return OpenAIChatClient(
+            api_key=api_key,
+            model=model,
+            base_url="https://api.groq.com/openai/v1",
+            provider="groq",
+        )
     if provider == "gemini":
         return GeminiChatClient(api_key=api_key, model=model)
     raise LLMConfigurationError(
-        f"Unsupported LLM_PROVIDER {provider!r}; configured providers: openai, gemini"
+        f"Unsupported LLM_PROVIDER {provider!r}; configured providers: openai, gemini, groq"
     )
