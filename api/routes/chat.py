@@ -1,0 +1,1 @@
+"""Versioned chat API route."""
